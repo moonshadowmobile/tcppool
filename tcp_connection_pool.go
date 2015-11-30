@@ -278,10 +278,11 @@ func (self *TCPConnectionPool) attemptWrite(query []byte) (uint64, *net.TCPConn,
 			continue
 		}
 		qlen := len(query)
+		self.lc.Debugf("workflow", "[%s] Wrote %d bytes for query of size %d.", self.Cls, num_written, qlen)
 		if num_written != qlen {
 			write_tries--
 			// a bad deal; this means we couldn't write the entire query to ephemeris
-			self.lc.Errorf("workflow", "[%s] Mismatch between the number of bytes in the provided query and number of bytes written to Ephemeris, num_query_bytes: %d, num_written: %d", self.Cls, qlen, num_written)
+			self.lc.Errorf("workflow", "[%s] Mismatch between the number of bytes in the provided query and number of bytes written to the target, num_query_bytes: %d, num_written: %d", self.Cls, qlen, num_written)
 			err := self.Release(conn_id, true)
 			if err != nil {
 				return 0, nil, err
@@ -299,7 +300,7 @@ func (self *TCPConnectionPool) attemptWrite(query []byte) (uint64, *net.TCPConn,
 	return conn_id, conn, nil
 }
 
-// Acquires a TCP connection, writes the provided byte slice, and buffers the entire JSON-encoded, UTF-8 response before unmarshaling it into the provided value. Do not use this function for queries that could return arbitrarily large responses, as you could blow up the process's memory. Use of this function assumes we can continue to use this connection in the future without rebuilding it - this is specific to how the Ephemeris TCP semantics are set up.
+// Acquires a TCP connection, writes the provided byte slice, and buffers the entire JSON-encoded, UTF-8 response before unmarshaling it into the provided value. Do not use this function for queries that could return arbitrarily large responses, as you could blow up the process's memory. Use of this function assumes we can continue to use this connection in the future without rebuilding it.
 func (self *TCPConnectionPool) SendAndReceiveJSON(destination_ptr interface{}, query []byte) error {
 	// newline signifies a complete query
 	query = append(query, '\u000A')
@@ -328,8 +329,8 @@ func (self *TCPConnectionPool) SendAndReceiveJSON(destination_ptr interface{}, q
 	return nil
 }
 
-// Acquires a TCP connection, writes the provided byte slice, and receives a JSON response in chunks. These chunks are piped directly to the provided destination. The destination must process each chunk in order for the next chunk to be read from the connection to Ephemeris. Use of this function assumes we can continue to use this connection in the future without rebuilding it - this is specific to how the Ephemeris TCP semantics are set up.
-func (self *TCPConnectionPool) SendAndReceiveJSONPiped(destination io.Writer, query []byte) error {
+// Acquires a TCP connection, writes the provided byte slice, and receives a JSON response in chunks. These chunks are piped directly to the provided destination. The destination must process each chunk in order for the next chunk to be read from the connection to the source. Use of this function assumes we can continue to use this connection in the future without rebuilding it.
+func (self *TCPConnectionPool) SendAndReceiveJSONPiped(destination io.Writer, query []byte, post_write func()) error {
 	// newline signifies a complete query
 	query = append(query, '\u000A')
 
@@ -347,17 +348,17 @@ func (self *TCPConnectionPool) SendAndReceiveJSONPiped(destination io.Writer, qu
 	conn.SetReadDeadline(time.Now().Add(time.Duration(3) * time.Second))
 	buf := make([]byte, self.buf_size)
 	for {
+		self.lc.Debugf("workflow", "[%s] Preparing to read response from source.", self.Cls)
 		num_read, err := conn.Read(buf[0:])
 		if err != nil {
-			if err != nil {
-				self.lc.Errorf("workflow", "[%s] Error reading from Ephemeris connection, error: %s", self.Cls, err.Error())
-				err2 := self.Release(conn_id, true)
-				if err2 != nil {
-					return err2
-				}
-				return err
+			self.lc.Errorf("workflow", "[%s] Error reading from source connection, error: %s", self.Cls, err.Error())
+			err2 := self.Release(conn_id, true)
+			if err2 != nil {
+				return err2
 			}
+			return err
 		}
+		self.lc.Debugf("workflow", "[%s] Read %d bytes from connection %d.", self.Cls, num_read, conn_id)
 		if uint16(num_read) == self.buf_size {
 			// a complete chunk was recieved, we know that there may be need to continue reading; we also know we can write the entire buffer without fear that we're sending data from a previous iteration.
 			for _, b := range buf {
@@ -374,16 +375,18 @@ func (self *TCPConnectionPool) SendAndReceiveJSONPiped(destination io.Writer, qu
 			}
 			num_written, err := destination.Write(buf)
 			if err != nil {
-				self.lc.Errorf("workflow", "[%s] Error writing Ephemeris response (full chunk) to destination connection, error: %s", self.Cls, err.Error())
+				self.lc.Errorf("workflow", "[%s] Error writing response (full chunk) to destination connection, error: %s", self.Cls, err.Error())
 				err2 := self.Release(conn_id, true)
 				if err2 != nil {
 					return err2
 				}
 				return err
 			}
+			self.lc.Debugf("workflow", "[%s] Wrote %d bytes to destination.", self.Cls, num_written)
+			if post_write != nil {post_write()}
 			if num_written != num_read {
 				// a bad deal; this means some of the data we received wasn't sent to the destination
-				self.lc.Errorf("workflow", "[%s] Mismatch between the number of bytes received from Ephemeris and the number of bytes written to the destination, num_received: %d, num_read: %d", self.Cls, num_read, num_written)
+				self.lc.Errorf("workflow", "[%s] Mismatch between the number of bytes received from source and the number of bytes written to the destination, num_received: %d, num_read: %d", self.Cls, num_read, num_written)
 				err := self.Release(conn_id, true)
 				if err != nil {
 					return err
@@ -406,16 +409,18 @@ func (self *TCPConnectionPool) SendAndReceiveJSONPiped(destination io.Writer, qu
 			}
 			num_written, err := destination.Write(buf[0:num_read])
 			if err != nil {
-				self.lc.Errorf("workflow", "[%s] Error writing Ephemeris response (partial chunk) to destination connection, error: %s", self.Cls, err.Error())
+				self.lc.Errorf("workflow", "[%s] Error writing response (partial chunk) to destination connection, error: %s", self.Cls, err.Error())
 				err2 := self.Release(conn_id, true)
 				if err2 != nil {
 					return err2
 				}
 				return err
 			}
+			self.lc.Debugf("workflow", "[%s] Wrote %d bytes to destination.", self.Cls, num_written)
+			if post_write != nil {post_write()}
 			if num_written != num_read {
 				// a bad deal; this means some of the data we received wasn't sent to the destination
-				self.lc.Errorf("workflow", "[%s] Mismatch between the number of bytes received from Ephemeris and the number of bytes written to the destination, num_received: %d, num_read: %d", self.Cls, num_read, num_written)
+				self.lc.Errorf("workflow", "[%s] Mismatch between the number of bytes received from source and the number of bytes written to the destination, num_received: %d, num_read: %d", self.Cls, num_read, num_written)
 				err := self.Release(conn_id, true)
 				if err != nil {
 					return err
@@ -440,6 +445,7 @@ func (self *TCPConnectionPool) SendAndReceiveJSONPiped(destination io.Writer, qu
 			}
 		}
 	}
+	if post_write != nil {post_write()}
 	err = self.Release(conn_id, true)
 	if err != nil {
 		return err
@@ -447,8 +453,8 @@ func (self *TCPConnectionPool) SendAndReceiveJSONPiped(destination io.Writer, qu
 	return nil
 }
 
-// Acquires a TCP connection, writes the provided byte slice, and receives a binary response in chunks. These chunks are piped directly to the provided destination. The destination must process each chunk in order for the next chunk to be read from the connection to Ephemeris. marking the acquired connection from the pool as unusable when finished - this is specific to how the Ephemeris TCP semantics are set up.
-func (self *TCPConnectionPool) SendAndReceiveBinaryPiped(destination io.Writer, query []byte) error {
+// Acquires a TCP connection, writes the provided byte slice, and receives a binary response in chunks. These chunks are piped directly to the provided destination. The destination must process each chunk in order for the next chunk to be read from the connection to the source. marking the acquired connection from the pool as unusable when finished.
+func (self *TCPConnectionPool) SendAndReceiveBinaryPiped(destination io.Writer, query []byte, post_write func()) error {
 	// newline signifies a complete query
 	query = append(query, '\u000A')
 
