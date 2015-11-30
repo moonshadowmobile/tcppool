@@ -1,0 +1,10 @@
+<seelog type="adaptive" mininterval="5000000" maxinterval="10000000" critmsgcount="500" minlevel="debug" maxlevel="critical">
+   <outputs formatid="basic">
+      <console/>
+   </outputs>
+   <formats>
+      <format id="basic" format="%Date %Time [%LEVEL] %Msg%n"/>
+      <format id="terse" format="%Ns [%LEV] %Msg%n"/>
+      <format id="crit" format="%Date %Time [%LEVEL] %File %FullPath %RelFile %Msg%n"/>
+   </formats>
+</seelog>
