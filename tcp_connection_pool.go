@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 	"time"
+	"io"
 )
 
 import (
@@ -328,7 +329,7 @@ func (self *TCPConnectionPool) SendAndReceiveJSON(destination_ptr interface{}, q
 }
 
 // Acquires a TCP connection, writes the provided byte slice, and receives a JSON response in chunks. These chunks are piped directly to the provided destination. The destination must process each chunk in order for the next chunk to be read from the connection to Ephemeris. Use of this function assumes we can continue to use this connection in the future without rebuilding it - this is specific to how the Ephemeris TCP semantics are set up.
-func (self *TCPConnectionPool) SendAndReceiveJSONPiped(destination net.Conn, query []byte) error {
+func (self *TCPConnectionPool) SendAndReceiveJSONPiped(destination io.Writer, query []byte) error {
 	// newline signifies a complete query
 	query = append(query, '\u000A')
 
@@ -344,7 +345,6 @@ func (self *TCPConnectionPool) SendAndReceiveJSONPiped(destination net.Conn, que
 
 	// These deadlines may be problematic for later calls to Read() and Write() for large responses.. if so, we can move this down into the loop or think of another way to handle it.
 	conn.SetReadDeadline(time.Now().Add(time.Duration(3) * time.Second))
-	destination.SetWriteDeadline(time.Now().Add(time.Duration(3) * time.Second))
 	buf := make([]byte, self.buf_size)
 	for {
 		num_read, err := conn.Read(buf[0:])
@@ -448,7 +448,7 @@ func (self *TCPConnectionPool) SendAndReceiveJSONPiped(destination net.Conn, que
 }
 
 // Acquires a TCP connection, writes the provided byte slice, and receives a binary response in chunks. These chunks are piped directly to the provided destination. The destination must process each chunk in order for the next chunk to be read from the connection to Ephemeris. marking the acquired connection from the pool as unusable when finished - this is specific to how the Ephemeris TCP semantics are set up.
-func (self *TCPConnectionPool) SendAndReceiveBinaryPiped(destination net.Conn, query []byte) error {
+func (self *TCPConnectionPool) SendAndReceiveBinaryPiped(destination io.Writer, query []byte) error {
 	// newline signifies a complete query
 	query = append(query, '\u000A')
 
